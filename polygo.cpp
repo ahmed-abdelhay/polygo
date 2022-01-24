@@ -17,6 +17,7 @@
 #include <vector>
 
 #if defined(POLYGO_IMPLEMENTATION)
+#include <omp.h>
 #include <GL/gl3w.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -153,6 +154,17 @@ static size_t GenerateID() {
   static size_t id = 0;
   return id++;
 }
+
+//----------------Threading---------------//
+using JobType = std::function<void(size_t)>;
+struct Range {
+  size_t start = 0;
+  size_t end = 0;
+};
+
+size_t GetMaxCpus();
+std::vector<Range> DivideForThreading(Range in, size_t threads);
+void ParallelFor(size_t start, size_t end, const JobType &job);
 
 //--------------------------------File IO---------------------//
 template <typename T = uint8_t> struct Buffer {
@@ -352,50 +364,50 @@ struct Expression {
     NodeType type;
     int32_t children[2] = {-1, -1};
     VariableType variable;
-    double constant;
+    float constant;
   };
 
   std::vector<Node> nodes;
   size_t rootNodeId = 0;
 
-  double Evaluate(int32_t nodeId, double x, double y, double z) const {
+  float Evaluate(int32_t nodeId, float x, float y, float z) const {
     const Node &node = nodes[nodeId];
     switch (node.type) {
     case NodeType::ADD: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
-      const double v1 = Evaluate(node.children[1], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
+      const float v1 = Evaluate(node.children[1], x, y, z);
       return v0 + v1;
     } break;
     case NodeType::SUB: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
-      const double v1 = Evaluate(node.children[1], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
+      const float v1 = Evaluate(node.children[1], x, y, z);
       return v0 - v1;
     } break;
     case NodeType::DIVIDE: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
-      const double v1 = Evaluate(node.children[1], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
+      const float v1 = Evaluate(node.children[1], x, y, z);
       return v0 / v1;
     } break;
     case NodeType::MULTIPLY: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
-      const double v1 = Evaluate(node.children[1], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
+      const float v1 = Evaluate(node.children[1], x, y, z);
       return v0 * v1;
     } break;
     case NodeType::POWER: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
-      const double v1 = Evaluate(node.children[1], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
+      const float v1 = Evaluate(node.children[1], x, y, z);
       return pow(v0, v1);
     } break;
     case NodeType::SIN: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
       return sin(v0);
     } break;
     case NodeType::COS: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
       return cos(v0);
     } break;
     case NodeType::TAN: {
-      const double v0 = Evaluate(node.children[0], x, y, z);
+      const float v0 = Evaluate(node.children[0], x, y, z);
       return tan(v0);
     } break;
     case NodeType::VARIABLE: {
@@ -416,7 +428,7 @@ struct Expression {
     return 0;
   }
 
-  double Evaluate(double x, double y, double z) const {
+  float Evaluate(float x, float y, float z) const {
     assert(!nodes.empty());
     return Evaluate(rootNodeId, x, y, z);
   }
@@ -431,6 +443,36 @@ Mesh Polygonise(const FunctionType &expr, float isolevel, const float min[3],
                 const float max[3], const float sampleDistance[3]);
 
 #ifdef POLYGO_IMPLEMENTATION
+size_t GetMaxCpus() { return omp_get_max_threads(); }
+
+std::vector<Range> DivideForThreading(Range in, size_t threads) {
+  assert(in.end >= in.start);
+  std::vector<Range> ranges;
+  ranges.reserve(threads);
+  const size_t rangeWidth = in.end - in.start;
+  const int evenLength = rangeWidth / threads;
+  std::vector<size_t> bucket_sizes(threads, evenLength);
+  const int surplus = rangeWidth % threads;
+  bucket_sizes[0] += surplus;
+
+  size_t k = in.start;
+  for (size_t i = 0; i < threads && k <= in.end; ++i) {
+    Range range;
+    range.start = k;
+    range.end = k + bucket_sizes[i];
+    k += bucket_sizes[i];
+    if (bucket_sizes[i]) {
+      ranges.push_back(range);
+    }
+  }
+  return ranges;
+}
+
+void ParallelFor(size_t start, size_t end, const JobType& job) {
+#pragma omp parallel for
+  for (int64_t i = start; i < end; ++i) { job(i); }
+}
+
 bool ReadFile(const char *fileName, std::vector<uint8_t> &data) {
   FILE *fp = fopen(fileName, "r");
   if (!fp) {
@@ -1734,20 +1776,24 @@ Mesh Polygonise(const FunctionType &expr, float isolevel, const float min[3],
     image.origin[i] = min[i];
     image.spacing[i] = spacing[i];
   }
+  const size_t cpus = GetMaxCpus();
+  const std::vector<Range> ranges = DivideForThreading(Range{0, size[2]}, cpus);
 
-  for (size_t z = 0; z < size[2]; z++) {
-    for (size_t y = 0; y < size[1]; y++) {
-      for (size_t x = 0; x < size[0]; x++) {
-        size_t index = z * (size[0] * size[1]) + y * size[0] + x;
-        const double pt3d[3]{
-            min[0] + spacing[0] * x,
-            min[1] + spacing[1] * y,
-            min[2] + spacing[2] * z,
-        };
-        image.At(x, y, z) = expr(pt3d[0], pt3d[1], pt3d[2]);
+  ParallelFor(0, ranges.size(), [&](size_t threadId) {
+    const Range range = ranges[threadId];
+    for (size_t z = range.start; z < range.end; z++) {
+      for (size_t y = 0; y < size[1]; y++) {
+        for (size_t x = 0; x < size[0]; x++) {
+          const double pt3d[3]{
+              min[0] + spacing[0] * x,
+              min[1] + spacing[1] * y,
+              min[2] + spacing[2] * z,
+          };
+          image.At(x, y, z) = expr(pt3d[0], pt3d[1], pt3d[2]);
+        }
       }
     }
-  }
+  });
 
   struct Grid {
     Vec3f p[8] = {};
@@ -1822,10 +1868,11 @@ Mesh Polygonise(const FunctionType &expr, float isolevel, const float min[3],
 
         /* Create the triangle */
         for (int i = 0; triTable[cubeindex][i] != -1; i += 3) {
-          Mesh::Triangle t;
-          t.idx[0] = InsertVertex(vertexList[triTable[cubeindex][i]]);
-          t.idx[1] = InsertVertex(vertexList[triTable[cubeindex][i + 1]]);
-          t.idx[2] = InsertVertex(vertexList[triTable[cubeindex][i + 2]]);
+          const Mesh::Triangle t {
+            (uint32_t)InsertVertex(vertexList[triTable[cubeindex][i]]),
+            (uint32_t)InsertVertex(vertexList[triTable[cubeindex][i + 1]]),
+            (uint32_t)InsertVertex(vertexList[triTable[cubeindex][i + 2]])
+          };
           result.faces.push_back(t);
         }
       }
@@ -2108,7 +2155,7 @@ struct State {
         const float max[3]{2, 2, 2};
         const float spacing[3]{0.05, 0.05, 0.05};
         Mesh mesh = Polygonise(
-            [](float x, float y, float z) {
+            [](float x, float y, float z) -> float {
               float x2 = x * x, y2 = y * y, z2 = z * z;
               float a = x2 + y2 + z2 + (0.5 * 0.5) - (0.1 * 0.1);
               return a * a - 4.0 * (0.5 * 0.5) * (y2 + z2);

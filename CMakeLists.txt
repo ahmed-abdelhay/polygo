@@ -16,5 +16,6 @@ set_target_properties(glfw    PROPERTIES FOLDER 3pty)
 set_target_properties(imgui   PROPERTIES FOLDER 3pty)
 set_target_properties(gl3w    PROPERTIES FOLDER 3pty)
 
+find_package(OpenMP REQUIRED)
 add_executable(Polygo ${CMAKE_CURRENT_SOURCE_DIR}/polygo.cpp)
-target_link_libraries(Polygo PRIVATE imgui glfw gl3w)
+target_link_libraries(Polygo PRIVATE imgui glfw gl3w OpenMP::OpenMP_CXX)
