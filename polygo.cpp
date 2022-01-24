@@ -509,13 +509,10 @@ Vec3f Lerp(float isolevel, Vec3f p1, Vec3f p2, float valp1, float valp2) {
   if (fabs(valp1 - valp2) < EPS) {
     return (p1);
   }
-  const float mu = (isolevel - valp1) / (valp2 - valp1);
-  Vec3f p = {};
-  p.x = p1.x + mu * (p2.x - p1.x);
-  p.y = p1.y + mu * (p2.y - p1.y);
-  p.z = p1.z + mu * (p2.z - p1.z);
-  return p;
+  const float t = (isolevel - valp1) / (valp2 - valp1);
+  return p1 + (p2 - p1) * t;
 }
+
 Connectivity BuildConnectivity(const Mesh &mesh) {
   Connectivity c;
   const size_t pointsCount = mesh.vertices.size();
@@ -1940,17 +1937,6 @@ static const size_t MAX_EXPRESSION_SIZE = 512;
 static const ImVec4 RED(1, 0, 0, 1);
 static const ImVec4 BLUE(41 / 255., 74 / 255., 122 / 255., 1);
 
-struct Function {
-  Expression expr;
-  char name[MAX_EXPRESSION_SIZE] = {};
-  Color color = GenerateColor();
-  bool visible = true;
-  float xRange[2] = {0, 1000};
-  float yRange[2] = {0, 1000};
-  float zRange[2] = {0, 1000};
-  float sampleDistance[3] = {0.1, 0.1, 0.1};
-};
-
 struct View3DState {
   static constexpr size_t TEXTURE_WIDTH = 1024;
   static constexpr size_t TEXTURE_HEIGHT = 1024;
@@ -2077,7 +2063,11 @@ struct View3DState {
 struct State {
   struct GuiState {
     std::string errorLog;
-    Function function;
+    char name[MAX_EXPRESSION_SIZE] = {};
+    float xRange[3] = {0, 1000, 0.1};
+    float yRange[3] = {0, 1000, 0.1};
+    float zRange[3] = {0, 1000, 0.1};
+    float isolevel = 0;
   };
 
   std::vector<Mesh> meshes;
@@ -2106,13 +2096,45 @@ struct State {
     const ImVec2 maxPoint = ImGui::GetWindowContentRegionMax();
     const float height = (maxPoint.y - minPoint.y);
     const float width = (maxPoint.x - minPoint.x);
-
-    view3d.Render(ImVec2(width, height * 0.8), meshes);
-    ImGui::BeginChild("Tools and Lists", ImVec2(-1, height * 0.2));
     {
+      ImGui::BeginGroup();
+      {
+        ImGui::BeginChild("Lists", ImVec2(0.3 * width, height * 0.2));
+        ImGui::TextColored(BLUE, "Functions");
+        for (Mesh &mesh : meshes) {
+          ImGui::Spacing();
+          if (ImGui::Checkbox(mesh.name.c_str(), &mesh.visible)) {
+            redraw = true;
+          }
+          ImGui::SameLine();
+          ImGui::Text("(%zu F, %zu V)", mesh.faces.size(),
+                      mesh.vertices.size());
+          ImGui::SameLine();
+          ImGui::PushID(mesh.name.c_str());
+          float color[3] = {mesh.color.r / 255.0f, mesh.color.g / 255.0f,
+                            mesh.color.b / 255.0f};
+          if (ImGui::ColorEdit3("Colour", color,
+                                ImGuiColorEditFlags_NoInputs |
+                                    ImGuiColorEditFlags_NoLabel)) {
+            mesh.color.r = color[0] * 255;
+            mesh.color.g = color[1] * 255;
+            mesh.color.b = color[2] * 255;
+            redraw = true;
+          }
+          ImGui::PopID();
+        }
+        ImGui::EndChild();
+      }
+      ImGui::SameLine();
+      view3d.Render(ImVec2(width * 0.8, height * 0.8), meshes);
+      ImGui::EndGroup();
+    }
+    
+    {
+      ImGui::BeginChild("Controls", ImVec2(-1, height * 0.2));
       ImGui::Text("Function:");
       ImGui::SameLine();
-      ImGui::InputText("##", gui.function.name, MAX_EXPRESSION_SIZE);
+      ImGui::InputText("##", gui.name, MAX_EXPRESSION_SIZE);
 
       ImGui::SameLine();
       if (ImGui::Button("Create torus")) {
@@ -2126,7 +2148,7 @@ struct State {
               return a * a - 4.0 * (0.5 * 0.5) * (y2 + z2);
             },
             0, min, max, spacing);
-        mesh.name = gui.function.name;
+        mesh.name = "torus";
         meshes.push_back(mesh);
         view3d.surfacesRenderInfo.push_back(CreateMeshRenderInfo(mesh));
         redraw = true;
@@ -2135,18 +2157,16 @@ struct State {
 
       ImGui::SameLine();
       if (ImGui::Button("Create surface")) {
+        Expression expr;
         if (ExpressionParseErrorType::OK ==
-            GenerateExpression(gui.function.name, gui.function.expr)) {
-          const float min[3]{gui.function.xRange[0], gui.function.yRange[0],
-                             gui.function.zRange[0]};
-          const float max[3]{gui.function.xRange[1], gui.function.yRange[1],
-                             gui.function.zRange[1]};
+            GenerateExpression(gui.name, expr)) {
+          const float min[3]{gui.xRange[0], gui.yRange[0], gui.zRange[0]};
+          const float max[3]{gui.xRange[1], gui.yRange[1], gui.zRange[1]};
+          const float spacing[3]{gui.xRange[2], gui.yRange[2], gui.zRange[2]};
           Mesh mesh = Polygonise(
-              [&](float x, float y, float z) {
-                return gui.function.expr.Evaluate(x, y, z);
-              },
-              0, min, max, gui.function.sampleDistance);
-          mesh.name = gui.function.name;
+              [&](float x, float y, float z) { return expr.Evaluate(x, y, z); },
+              gui.isolevel, min, max, spacing);
+          mesh.name = gui.name;
           meshes.push_back(mesh);
           view3d.surfacesRenderInfo.push_back(CreateMeshRenderInfo(mesh));
           redraw = true;
@@ -2156,65 +2176,33 @@ struct State {
         }
       }
 
-      ImGui::Text("Range:");
+      ImGui::Text("Range (min, max, spacing):");
       ImGui::BeginGroup();
       {
         ImGui::Text("X:");
         ImGui::SameLine();
-        ImGui::InputFloat2("##0", gui.function.xRange);
-        ImGui::SameLine();
-        ImGui::Text("dX:");
-        ImGui::SameLine();
-        ImGui::InputFloat("##1", &gui.function.sampleDistance[0]);
+        ImGui::InputFloat3("##0", gui.xRange);
 
         ImGui::Text("Y:");
         ImGui::SameLine();
-        ImGui::InputFloat2("##2", gui.function.yRange);
-        ImGui::SameLine();
-        ImGui::Text("dY:");
-        ImGui::SameLine();
-        ImGui::InputFloat("##3", &gui.function.sampleDistance[1]);
+        ImGui::InputFloat3("##2", gui.yRange);
 
         ImGui::Text("Z:");
         ImGui::SameLine();
-        ImGui::InputFloat2("##4", gui.function.zRange);
+        ImGui::InputFloat3("##4", gui.zRange);
+
+        ImGui::Text("Iso level:");
         ImGui::SameLine();
-        ImGui::Text("dZ:");
-        ImGui::SameLine();
-        ImGui::InputFloat("##5", &gui.function.sampleDistance[2]);
+        ImGui::InputFloat("##4", &gui.isolevel);
       }
       ImGui::EndGroup();
 
       if (gui.errorLog.size()) {
         ImGui::TextColored(RED, gui.errorLog.c_str());
       }
-
-      ImGui::TextColored(BLUE, "Functions");
-      for (Mesh &mesh : meshes) {
-        ImGui::Spacing();
-        if (ImGui::Checkbox(mesh.name.c_str(), &mesh.visible)) {
-          redraw = true;
-        }
-        ImGui::SameLine();
-        ImGui::Text("(%uz Faces, %uz Vertices)", mesh.faces.size(),
-                    mesh.vertices.size());
-        ImGui::SameLine();
-        ImGui::PushID(mesh.name.c_str());
-        float color[3] = {mesh.color.r / 255.0f, mesh.color.g / 255.0f,
-                          mesh.color.b / 255.0f};
-        if (ImGui::ColorEdit3("Colour", color,
-                              ImGuiColorEditFlags_NoInputs |
-                                  ImGuiColorEditFlags_NoLabel)) {
-          mesh.color.r = color[0] * 255;
-          mesh.color.g = color[1] * 255;
-          mesh.color.b = color[2] * 255;
-          redraw = true;
-        }
-        ImGui::PopID();
-      }
+      ImGui::Text("Application average: %.1f FPS", ImGui::GetIO().Framerate);
+      ImGui::EndChild();
     }
-    ImGui::Text("Application average: %.1f FPS", ImGui::GetIO().Framerate);
-    ImGui::EndChild();
     ImGui::End();
   }
 };
