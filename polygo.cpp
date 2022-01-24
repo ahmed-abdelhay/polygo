@@ -2086,7 +2086,6 @@ struct State {
   std::vector<Mesh> meshes;
   View3DState view3d;
   GuiState gui;
-  bool redraw = true;
 
   void Startup() {
     view3d.program = CreateProgram(wires_gs, wires_vs, wires_fs);
@@ -2117,7 +2116,7 @@ struct State {
         for (Mesh &mesh : meshes) {
           ImGui::Spacing();
           if (ImGui::Checkbox(mesh.name.c_str(), &mesh.visible)) {
-            redraw = true;
+            view3d.redraw = true;
           }
           ImGui::SameLine();
           ImGui::Text("(%zu F, %zu V)", mesh.faces.size(),
@@ -2132,7 +2131,7 @@ struct State {
             mesh.color.r = color[0] * 255;
             mesh.color.g = color[1] * 255;
             mesh.color.b = color[2] * 255;
-            redraw = true;
+            view3d.redraw = true;
           }
           ImGui::PopID();
         }
@@ -2164,7 +2163,25 @@ struct State {
         mesh.name = "torus";
         meshes.push_back(mesh);
         view3d.surfacesRenderInfo.push_back(CreateMeshRenderInfo(mesh));
-        redraw = true;
+        view3d.redraw = true;
+        gui = {};
+      }
+
+      ImGui::SameLine();
+      if (ImGui::Button("Create sphere")) {
+        const float min[3]{-2, -2, -2};
+        const float max[3]{2, 2, 2};
+        const float spacing[3]{0.05, 0.05, 0.05};
+        Mesh mesh = Polygonise(
+            [](float x, float y, float z) -> float {
+              float x2 = x * x, y2 = y * y, z2 = z * z;
+              return x2 + y2 + z2 - 1;
+            },
+            0, min, max, spacing);
+        mesh.name = "sphere";
+        meshes.push_back(mesh);
+        view3d.surfacesRenderInfo.push_back(CreateMeshRenderInfo(mesh));
+        view3d.redraw = true;
         gui = {};
       }
 
@@ -2182,7 +2199,7 @@ struct State {
           mesh.name = gui.name;
           meshes.push_back(mesh);
           view3d.surfacesRenderInfo.push_back(CreateMeshRenderInfo(mesh));
-          redraw = true;
+          view3d.redraw = true;
           gui = {};
         } else {
           gui.errorLog = "Error parsing the expression";
